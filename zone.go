@@ -1,10 +1,30 @@
 // Copyright (c) HashiCorp, Inc.
 // SPDX-License-Identifier: MIT
+//
+// Copyright (c) 2014 HashiCorp, Inc.
+//
+// Permission is hereby granted, free of charge, to any person obtaining a copy of
+// this software and associated documentation files (the "Software"), to deal in
+// the Software without restriction, including without limitation the rights to
+// use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of
+// the Software, and to permit persons to whom the Software is furnished to do so,
+// subject to the following conditions:
+//
+// The above copyright notice and this permission notice shall be included in all
+// copies or substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS
+// FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR
+// COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
+// IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
+// CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 package main
 
 import (
 	"fmt"
+	"log"
 	"net"
 	"os"
 	"strings"
@@ -14,7 +34,8 @@ import (
 
 const (
 	// defaultTTL is the default TTL value in returned DNS records in seconds.
-	defaultTTL = 120
+	defaultTTL = 240
+	longTTL    = 7200
 )
 
 // Zone is the interface used to integrate with the server and
@@ -96,26 +117,19 @@ func NewMDNSService(instance, service, domain, hostName string, port int, ips []
 		return nil, fmt.Errorf("hostName %q is not a fully-qualified domain name: %v", hostName, err)
 	}
 
-	if len(ips) == 0 {
-		var err error
-		ips, err = net.LookupIP(hostName)
-		if err != nil {
-			// Try appending the host domain suffix and lookup again
-			// (required for Linux-based hosts)
-			tmpHostName := fmt.Sprintf("%s%s", hostName, domain)
-
-			ips, err = net.LookupIP(tmpHostName)
-
-			if err != nil {
-				return nil, fmt.Errorf("could not determine host IP addresses for %s", hostName)
-			}
-		}
-	}
 	for _, ip := range ips {
 		if ip.To4() == nil && ip.To16() == nil {
 			return nil, fmt.Errorf("invalid IP address in IPs list: %v", ip)
 		}
 	}
+
+	serviceAddr := fmt.Sprintf("%s.%s.", trimDot(service), trimDot(domain))
+	instanceAddr := fmt.Sprintf("%s.%s.%s.", instance, trimDot(service), trimDot(domain))
+	enumAddr := fmt.Sprintf("_services._dns-sd._udp.%s.", trimDot(domain))
+
+	log.Println("Service Addr:", serviceAddr)
+	log.Println("Instance Addr:", instanceAddr)
+	log.Println("Enum Addr:", enumAddr)
 
 	return &MDNSService{
 		Instance:     instance,
@@ -125,9 +139,9 @@ func NewMDNSService(instance, service, domain, hostName string, port int, ips []
 		Port:         port,
 		IPs:          ips,
 		TXT:          txt,
-		serviceAddr:  fmt.Sprintf("%s.%s.", trimDot(service), trimDot(domain)),
-		instanceAddr: fmt.Sprintf("%s.%s.%s.", instance, trimDot(service), trimDot(domain)),
-		enumAddr:     fmt.Sprintf("_services._dns-sd._udp.%s.", trimDot(domain)),
+		serviceAddr:  serviceAddr,
+		instanceAddr: instanceAddr,
+		enumAddr:     enumAddr,
 	}, nil
 }
 
@@ -137,22 +151,31 @@ func trimDot(s string) string {
 }
 
 // Records returns DNS records in response to a DNS question.
-func (m *MDNSService) Records(q dns.Question) []dns.RR {
+func (m *MDNSService) Records(q dns.Question) (records []dns.RR) {
 	switch q.Name {
 	case m.enumAddr:
-		return m.serviceEnum(q)
+		records = m.serviceEnum(q)
 	case "_universal._sub." + m.serviceAddr, m.serviceAddr:
-		return m.serviceRecords(q)
-	case m.instanceAddr:
-		return m.instanceRecords(q)
+		records = m.serviceRecords(q)
+
+	case m.instanceAddr, strings.ToLower(m.instanceAddr):
+		records = m.instanceRecords(q)
+
 	case m.HostName:
 		if q.Qtype == dns.TypeA || q.Qtype == dns.TypeAAAA {
-			return m.instanceRecords(q)
+			records = m.instanceRecords(q)
+			if len(records) != 0 {
+				return records
+			}
 		}
+
 		fallthrough
 	default:
+		// log.Println("mdns: unhandled", q)
 		return nil
 	}
+
+	return records
 }
 
 func (m *MDNSService) serviceEnum(q dns.Question) []dns.RR {
@@ -165,7 +188,7 @@ func (m *MDNSService) serviceEnum(q dns.Question) []dns.RR {
 				Name:   q.Name,
 				Rrtype: dns.TypePTR,
 				Class:  dns.ClassINET,
-				Ttl:    defaultTTL,
+				Ttl:    longTTL,
 			},
 			Ptr: m.serviceAddr,
 		}
@@ -192,7 +215,6 @@ func (m *MDNSService) serviceRecords(q dns.Question) []dns.RR {
 			},
 			Ptr: m.instanceAddr,
 		}
-		servRec := []dns.RR{rr}
 
 		// Get the instance records
 		instRecs := m.instanceRecords(dns.Question{
@@ -200,8 +222,12 @@ func (m *MDNSService) serviceRecords(q dns.Question) []dns.RR {
 			Qtype: dns.TypeANY,
 		})
 
+		var servRec []dns.RR
+		servRec = append(servRec, rr)
+		servRec = append(servRec, instRecs...)
+
 		// Return the service record with the instance records
-		return append(servRec, instRecs...)
+		return servRec
 	default:
 		return nil
 	}
@@ -275,10 +301,8 @@ func (m *MDNSService) instanceRecords(q dns.Question) []dns.RR {
 				Class:  dns.ClassINET,
 				Ttl:    defaultTTL,
 			},
-			Priority: 10,
-			Weight:   1,
-			Port:     uint16(m.Port),
-			Target:   m.HostName,
+			Port:   uint16(m.Port),
+			Target: m.HostName,
 		}
 		recs := []dns.RR{srv}
 
@@ -301,7 +325,7 @@ func (m *MDNSService) instanceRecords(q dns.Question) []dns.RR {
 				Name:   q.Name,
 				Rrtype: dns.TypeTXT,
 				Class:  dns.ClassINET,
-				Ttl:    defaultTTL,
+				Ttl:    longTTL,
 			},
 			Txt: m.TXT,
 		}

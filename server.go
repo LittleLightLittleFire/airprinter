@@ -1,5 +1,24 @@
 // Copyright (c) HashiCorp, Inc.
 // SPDX-License-Identifier: MIT
+//
+// Copyright (c) 2014 HashiCorp, Inc.
+//
+// Permission is hereby granted, free of charge, to any person obtaining a copy of
+// this software and associated documentation files (the "Software"), to deal in
+// the Software without restriction, including without limitation the rights to
+// use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of
+// the Software, and to permit persons to whom the Software is furnished to do so,
+// subject to the following conditions:
+//
+// The above copyright notice and this permission notice shall be included in all
+// copies or substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS
+// FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR
+// COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
+// IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
+// CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 package main
 
@@ -187,7 +206,7 @@ func (s *Server) handleQuery(query *dns.Msg, from net.Addr) error {
 			return nil
 		}
 
-		return &dns.Msg{
+		msg := dns.Msg{
 			MsgHdr: dns.MsgHdr{
 				Id: id,
 
@@ -217,8 +236,21 @@ func (s *Server) handleQuery(query *dns.Msg, from net.Addr) error {
 			// API, not part of the DNS packet) to true.
 			Compress: true,
 
-			Answer: answer,
+			Answer: answer[0:1],
+			Extra:  answer[1:],
 		}
+
+		// log.Println("    Answer")
+		// for _, answer := range msg.Answer {
+		// 	log.Println("        ", answer)
+		// }
+
+		// log.Println("    Extra")
+		// for _, extra := range msg.Extra {
+		// 	log.Println("        ", extra)
+		// }
+
+		return &msg
 	}
 
 	if s.config.LogEmptyResponses && len(multicastAnswer) == 0 && len(unicastAnswer) == 0 {
@@ -272,15 +304,21 @@ func (s *Server) handleQuestion(q dns.Question) (multicastRecs, unicastRecs []dn
 
 // sendResponse is used to send a response packet
 func (s *Server) sendResponse(resp *dns.Msg, from net.Addr, unicast bool) error {
-	// TODO(reddaly): Respect the unicast argument, and allow sending responses
-	// over multicast.
 	buf, err := resp.Pack()
 	if err != nil {
 		return err
 	}
 
 	// Determine the socket to send from
-	addr := from.(*net.UDPAddr)
+	var addr *net.UDPAddr
+	if unicast {
+		addr = from.(*net.UDPAddr)
+	} else {
+		addr, err = net.ResolveUDPAddr("udp", "224.0.0.251:5353")
+		if err != nil {
+			return err
+		}
+	}
 	if addr.IP.To4() != nil {
 		_, err = s.ipv4List.WriteToUDP(buf, addr)
 		return err
